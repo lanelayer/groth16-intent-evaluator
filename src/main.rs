@@ -1,36 +1,71 @@
 #![no_std]
 #![no_main]
 
-use risc0_groth16::{ProofJson, PublicInputsJson, Verifier, VerifyingKeyJson};
-mod utils;
-mod panic_handler;
-mod cmio;
-use crate::cmio::HTIF_DEVICE_YIELD;
-use crate::cmio::HTIF_YIELD_CMD_MANUAL;
-use crate::cmio::pack_yield;
-use crate::cmio::sbi_yield;
 extern crate alloc;
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use ciborium::de::from_reader;
 use linked_list_allocator::LockedHeap;
+use risc0_groth16::{ProofJson, PublicInputsJson, Verifier, VerifyingKeyJson};
 use riscv_rt::entry;
+
+mod cmio;
+mod panic_handler;
+mod utils;
+
+use crate::cmio::{CMIODriver, HTIF_DEVICE_YIELD, HTIF_YIELD_CMD_MANUAL, pack_yield, sbi_yield};
+
+const HEAP_START: usize = 0x8100_0000;
+const HEAP_SIZE: usize = 512 * 1024;
+
+const PERMISSION_GRANTED_TRUE: &str = r#"{"Exit": {"code": 0}}"#;
+const PERMISSION_GRANTED_FALSE: &str = r#"{"Exit": {"code": 1}}"#;
+const READ_EXTRA_DATA: &str = r#"{"ReadExtraData": {}}"#;
+const QUERY_COMMAND_TYPE: &str = r#"{"QueryCommandType": {}}"#;
+
+const VERIFYING_KEY_INDEX: usize = 0;
+const PROOF_INDEX: usize = 1;
+const PUBLIC_INPUTS_INDEX: usize = 2;
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-const TEST_VERIFICATION_KEY: &str = "{\n \"protocol\": \"groth16\",\n \"curve\": \"bn128\",\n \"nPublic\": 1,\n \"vk_alpha_1\": [\n  \"1294134766316609703328581643861691998063901679593305122518960283123018706388\",\n  \"13333629383043588737044454681202570079155905422740155054898346012606076806713\",\n  \"1\"\n ],\n \"vk_beta_2\": [\n  [\n   \"2173330313723596358484167553880140545051512882245565043987444676076276437843\",\n   \"17664927106745560489997587182635122110932281433243608150300401610335045630458\"\n  ],\n  [\n   \"15273531101849588270786039343703563036519656806292651941045419058100734479928\",\n   \"5906890440295795612829674167362972238653435457353882556276325798552943068201\"\n  ],\n  [\n   \"1\",\n   \"0\"\n  ]\n ],\n \"vk_gamma_2\": [\n  [\n   \"10857046999023057135944570762232829481370756359578518086990519993285655852781\",\n   \"11559732032986387107991004021392285783925812861821192530917403151452391805634\"\n  ],\n  [\n   \"8495653923123431417604973247489272438418190587263600148770280649306958101930\",\n   \"4082367875863433681332203403145435568316851327593401208105741076214120093531\"\n  ],\n  [\n   \"1\",\n   \"0\"\n  ]\n ],\n \"vk_delta_2\": [\n  [\n   \"18082335820320067675049162254051449653127391848352997939790860074257698080107\",\n   \"8330577861444131504217321247245855407953761241369242366142989304032525780907\"\n  ],\n  [\n   \"17303423980605275724415088817235493141378511193276153617545225405070114888674\",\n   \"14329686539600445325529176452626235089284148901536698629845437848687632586506\"\n  ],\n  [\n   \"1\",\n   \"0\"\n  ]\n ],\n \"vk_alphabeta_12\": [\n  [\n   [\n    \"21597631232807937363539811467397773006510227572521934676321553463646334198635\",\n    \"262163796566031525966924304077669698911462791938684055481358366761190909624\"\n   ],\n   [\n    \"7906541510069809568866569458625474906165138266731006158097677153173003081190\",\n    \"6033731974653073317939840745456215697935806048520129111479696325287019924880\"\n   ],\n   [\n    \"14704987171684462743284913958358496425592435250893903733996815280116183837956\",\n    \"11976893335360452767634479785443059483596766884568778627130863225715341853664\"\n   ]\n  ],\n  [\n   [\n    \"12328097080442051249349425344337187894102839822992588206855395089786926203816\",\n    \"13682208775939290403599679510439179899909912951037259533145887567028127550386\"\n   ],\n   [\n    \"21192833402016971123221885086549612170051010389337807472438934720324822965947\",\n    \"13562414185694763175024854871060329561479364355902009699411281367056182859582\"\n   ],\n   [\n    \"19521540372565909644039072005218101866465290490181239648233003077758316514534\",\n    \"14972591569740303137698557285367668726475164123365050189180689552096060582998\"\n   ]\n  ]\n ],\n \"IC\": [\n  [\n   \"14881188593619314262120916669096182039078823054228847940501571078734139590733\",\n   \"14154402986581165757157012590900333439821186463176177723513413360706693112432\",\n   \"1\"\n  ],\n  [\n   \"12590475535581033066201434982368662557531886044597804777316719198629101964198\",\n   \"15378991198052714418783412681738830395150582056324300616272352953924768221974\",\n   \"1\"\n  ]\n ]\n}";
-const TEST_PROOF: &str = "{\n \"pi_a\": [\n  \"19752044163435112998099796779947263139365269296294968520404327719124263547111\",\n  \"11069769267857023583069178672374572453291648685282843843698422556496935187114\",\n  \"1\"\n ],\n \"pi_b\": [\n  [\n   \"10648747807246846520146780919185052825636963110330658206295040747407885055071\",\n   \"12804372218404923567755746304221068640275041956837635530943827697901769703079\"\n  ],\n  [\n   \"2503338810872511988681832059415719063350505376876347903054293313634087665155\",\n   \"9633905142041006786673594506047895273339766343254274246797495142581149020665\"\n  ],\n  [\n   \"1\",\n   \"0\"\n  ]\n ],\n \"pi_c\": [\n  \"3377589055768505200338103068502385766692581078477457038865468586522780813958\",\n  \"3539307538774736362004944548122522044958136460057956047632676706584864343097\",\n  \"1\"\n ],\n \"protocol\": \"groth16\",\n \"curve\": \"bn128\"\n}";
-const TEST_PUBLIC_INPUTS: &str = "[\n \"33\"\n]";
-
-fn verify() -> Result<(), anyhow::Error>{
-    let verifying_key: VerifyingKeyJson = serde_json::from_str(TEST_VERIFICATION_KEY).unwrap();
-    let proof: ProofJson = serde_json::from_str(TEST_PROOF).unwrap();
-    let public_inputs = PublicInputsJson {
-        values: serde_json::from_str(TEST_PUBLIC_INPUTS).unwrap(),
-    };
-    let verifier = Verifier::from_json(proof, public_inputs, verifying_key).unwrap();
+fn verify_proof(
+    verifying_key: VerifyingKeyJson,
+    proof: ProofJson,
+    public_inputs: PublicInputsJson,
+) -> Result<(), anyhow::Error> {
+    let verifier = Verifier::from_json(proof, public_inputs, verifying_key)?;
     verifier.verify()
 }
-const HEAP_START: usize = 0x8100_0000;
-const HEAP_SIZE: usize = 512 * 1024;
+
+fn send_message_and_yield(device: &CMIODriver, message: &str) -> Result<usize, anyhow::Error> {
+    let bytes_written = device.tx_write(message.as_bytes());
+    let yield_request = pack_yield(
+        HTIF_DEVICE_YIELD,
+        HTIF_YIELD_CMD_MANUAL,
+        0,
+        bytes_written as u32,
+    );
+    Ok(sbi_yield(yield_request))
+}
+
+fn send_message_and_read_response(
+    device: &CMIODriver,
+    message: &str,
+) -> Result<Vec<u8>, anyhow::Error> {
+    let bytes_written = device.tx_write(message.as_bytes());
+    let yield_request = pack_yield(
+        HTIF_DEVICE_YIELD,
+        HTIF_YIELD_CMD_MANUAL,
+        0,
+        bytes_written as u32,
+    );
+    let response_length = sbi_yield(yield_request);
+    Ok(device.rx_read(response_length))
+}
 
 #[entry]
 fn main() -> ! {
@@ -38,21 +73,98 @@ fn main() -> ! {
         ALLOCATOR.lock().init(HEAP_START as *mut u8, HEAP_SIZE);
     }
 
-    let dev = cmio::CMIODriver::new();
+    let device = CMIODriver::new();
 
-    let msg = b"Starting Groth16 verification...\n";
-    let written: usize = dev.tx_write(msg);
-    println!("GUEST: wrote {} bytes to HOST(TX)", written);
+    let command_type = get_current_command_type(&device);
 
-    let req = pack_yield(HTIF_DEVICE_YIELD, HTIF_YIELD_CMD_MANUAL, 0, written as u32);
-    let _ = sbi_yield(req);
-    verify().unwrap();
-    let msg = b"Verification completed successfully!\n";
-    let written: usize = dev.tx_write(msg);
-    println!("GUEST: wrote {} bytes to HOST(TX)", written);
+    match command_type.as_str() {
+        "LockIntentForSolving" | "CancelIntent" | "CancelIntentLock" => {
+            send_message_and_yield(&device, PERMISSION_GRANTED_TRUE).unwrap();
+        }
+        "SolveIntent" => {
+            let extra_data_response = match send_message_and_read_response(&device, READ_EXTRA_DATA)
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    println!("Failed to read extra data: {:?}", e);
+                    utils::shutdown();
+                }
+            };
 
-    let req = pack_yield(HTIF_DEVICE_YIELD, HTIF_YIELD_CMD_MANUAL, 0, written as u32);
-    let _ = sbi_yield(req);
+            let blob_hashes = parse_blob_hashes_from_response(&extra_data_response);
+
+            let verifying_key_json = read_blob_by_hash(&device, &blob_hashes[VERIFYING_KEY_INDEX]);
+            let proof_json = read_blob_by_hash(&device, &blob_hashes[PROOF_INDEX]);
+            let public_inputs_json = read_blob_by_hash(&device, &blob_hashes[PUBLIC_INPUTS_INDEX]);
+
+            let verifying_key: VerifyingKeyJson = serde_json::from_str(&verifying_key_json)
+                .expect("Failed to parse verifying key JSON");
+            let proof: ProofJson =
+                serde_json::from_str(&proof_json).expect("Failed to parse proof JSON");
+            let public_values: Vec<String> = serde_json::from_str(&public_inputs_json)
+                .expect("Failed to parse public inputs JSON");
+            let public_inputs = PublicInputsJson {
+                values: public_values,
+            };
+
+            if let Err(e) = verify_proof(verifying_key, proof, public_inputs) {
+                println!("Proof verification failed: {:?}", e);
+                send_message_and_yield(&device, PERMISSION_GRANTED_FALSE).unwrap();
+                utils::shutdown();
+            }
+
+            send_message_and_yield(&device, PERMISSION_GRANTED_TRUE).unwrap();
+        }
+        _ => {
+            send_message_and_yield(&device, PERMISSION_GRANTED_FALSE).unwrap();
+        }
+    }
     utils::shutdown();
 }
 
+fn parse_blob_hashes_from_response(response: &[u8]) -> Vec<String> {
+    let json_value: serde_json::Value =
+        serde_json::from_slice(response).expect("Failed to parse extra data response JSON");
+
+    let extra_data_array = &json_value["ExtraDataResponse"]["extra_data"];
+    let cbor_bytes: Vec<u8> = extra_data_array
+        .as_array()
+        .expect("Extra data is not an array")
+        .iter()
+        .map(|v| v.as_u64().expect("Invalid array element") as u8)
+        .collect();
+
+    from_reader(cbor_bytes.as_slice()).expect("Failed to decode CBOR blob hashes")
+}
+
+fn get_current_command_type(device: &CMIODriver) -> String {
+    let response = send_message_and_read_response(device, QUERY_COMMAND_TYPE)
+        .expect("Failed to query command type");
+
+    println!("get_current_command_type response: {:?}", response);
+
+    let json_value: serde_json::Value =
+        serde_json::from_slice(&response).expect("Failed to parse command type response");
+
+    json_value["CommandTypeResponse"]["command_type"]
+        .as_str()
+        .unwrap_or("Unknown")
+        .to_string()
+}
+
+fn read_blob_by_hash(device: &CMIODriver, hash_hex: &str) -> String {
+    let message = alloc::format!(r#"{{"ReadBlob": {{"blob_hash_hex": "{}"}}}}"#, hash_hex);
+    let response = send_message_and_read_response(device, &message).expect("Failed to read blob");
+
+    let json_value: serde_json::Value =
+        serde_json::from_slice(&response).expect("Failed to parse blob response");
+
+    let data_hex = json_value["BlobResponse"]["data_hex"]
+        .as_str()
+        .expect("Missing data_hex field")
+        .trim_start_matches("0x");
+
+    let bytes = hex::decode(data_hex).expect("Failed to decode hex data");
+
+    String::from_utf8(bytes).expect("Invalid UTF-8 in blob data")
+}

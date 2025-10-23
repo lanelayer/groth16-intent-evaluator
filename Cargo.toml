@@ -10,6 +10,8 @@ serde_json = {version = "1.0.145", default-features = false, features = ["alloc"
 sbi="0.3"
 riscv-rt={version="0.14", features=["s-mode"]}
 anyhow = {version = "1.0.100", default-features = false }
+hex = { version = "0.4", default-features = false }
+ciborium = { version = "0.2.2", default-features = false }
 
 [profile.release]
 opt-level = "z"
